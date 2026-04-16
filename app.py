@@ -4,6 +4,7 @@ import os
 
 import akshare as ak
 import pandas as pd
+import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
@@ -12,7 +13,7 @@ warnings.filterwarnings("ignore")
 
 
 DEFAULT_CODES = ["09992", "01114"]
-APP_VERSION = "v3.3"
+APP_VERSION = "v3.4"
 SENSITIVITY_OPTIONS = [str(i) for i in range(1, 11)] + ["手动微调"]
 
 
@@ -100,6 +101,42 @@ def fetch_hk_data(
     end_dt = backtest_end_date or datetime.now().date()
     start_date = pd.to_datetime(start_dt).strftime("%Y%m%d")
     end_date = pd.to_datetime(end_dt).strftime("%Y%m%d")
+
+    # 优先走 yfinance：在云端通常更稳定，显著降低超时概率
+    try:
+        yf_symbol = f"{symbol}.HK"
+        yf_df = yf.download(
+            yf_symbol,
+            start=pd.to_datetime(start_dt).strftime("%Y-%m-%d"),
+            end=(pd.to_datetime(end_dt) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+            timeout=8,
+        )
+        if yf_df is not None and not yf_df.empty:
+            yf_df = yf_df.reset_index().rename(
+                columns={
+                    "Date": "date",
+                    "Open": "open",
+                    "High": "high",
+                    "Low": "low",
+                    "Close": "close",
+                    "Volume": "volume",
+                }
+            )
+            for c in ["open", "high", "low", "close", "volume"]:
+                if c in yf_df.columns:
+                    yf_df[c] = pd.to_numeric(yf_df[c], errors="coerce")
+            yf_df["date"] = pd.to_datetime(yf_df["date"])
+            yf_df = yf_df.dropna(subset=["date", "open", "high", "low", "close"]).sort_values("date").reset_index(drop=True)
+            yf_df = yf_df[(yf_df["date"] >= pd.to_datetime(start_dt)) & (yf_df["date"] <= pd.to_datetime(end_dt))]
+            if not yf_df.empty:
+                return yf_df
+    except Exception:
+        pass
+
     proxy_keys = [
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -129,7 +166,7 @@ def fetch_hk_data(
             else:
                 os.environ.pop(k, None)
 
-    # 主源失败时自动降级到 stock_hk_daily，避免接口波动导致全页面无数据
+    # yfinance 不可用时，降级到 akshare
     if df is None or df.empty:
         try:
             df = ak.stock_hk_daily(symbol=symbol, adjust=adjust)
