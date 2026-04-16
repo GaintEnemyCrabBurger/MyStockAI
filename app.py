@@ -235,19 +235,24 @@ def calculate_signals(
 
 
 def get_action_suggestion(last: pd.Series) -> str:
-    if abs(float(last["K"]) - 50) <= 10 and abs(float(last["RSI6"]) - 50) <= 10:
-        return "观望"
-    if bool(last["sell_signal"]):
+    if bool(last.get("sell_signal", False)) or bool(last.get("strong_sell_signal", False)):
         return "减仓"
-    if bool(last["buy_signal"]):
+    if bool(last.get("buy_signal", False)) or bool(last.get("strong_buy_signal", False)):
         return "抄底"
-    if float(last["RSI6"]) > 70:
+    rsi = float(last.get("RSI6", 50))
+    macd = float(last.get("MACD", 0))
+    macd_signal = float(last.get("MACD_SIGNAL", 0))
+    if rsi > 72:
         return "持股"
+    if rsi < 30 and macd > macd_signal:
+        return "关注反弹"
+    if abs(float(last.get("K", 50)) - 50) <= 8 and abs(rsi - 50) <= 8:
+        return "观望"
     return "观望"
 
 
 def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
-    x_vals = df["date"].dt.strftime("%Y-%m-%d")
+    x_vals = df["date"]
     j_plot = df["J"]
     price_min = float(df["low"].min())
     price_max = float(df["high"].max())
@@ -298,7 +303,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
     ob = df[df["overbought"]]
     fig.add_trace(
         go.Scatter(
-            x=buys["date"].dt.strftime("%Y-%m-%d"),
+            x=buys["date"],
             y=buys["low"] * 0.996,
             mode="markers",
             marker=dict(size=10, color="#2E7D32", symbol="triangle-up", line=dict(width=1, color="#1B5E20")),
@@ -310,7 +315,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
     )
     fig.add_trace(
         go.Scatter(
-            x=sells["date"].dt.strftime("%Y-%m-%d"),
+            x=sells["date"],
             y=sells["high"] * 1.004,
             mode="markers",
             marker=dict(size=10, color="#C62828", symbol="triangle-down", line=dict(width=1, color="#7F0000")),
@@ -322,7 +327,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
     )
     fig.add_trace(
         go.Scatter(
-            x=strong_buys["date"].dt.strftime("%Y-%m-%d"),
+            x=strong_buys["date"],
             y=strong_buys["low"] * 0.992,
             mode="markers+text",
             text=["强买"] * len(strong_buys),
@@ -337,13 +342,13 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
     )
     fig.add_trace(
         go.Scatter(
-            x=strong_sells["date"].dt.strftime("%Y-%m-%d"),
+            x=strong_sells["date"],
             y=strong_sells["high"] * 1.008,
             mode="markers+text",
             text=["强卖"] * len(strong_sells),
             textposition="top center",
             textfont=dict(size=10, color="#5A0000"),
-            marker=dict(size=14, color="#FF1744", symbol="star-diamond", line=dict(width=1.4, color="#5A0000")),
+            marker=dict(size=14, color="#FF1744", symbol="diamond", line=dict(width=1.4, color="#5A0000")),
             name="强力卖出",
             hovertemplate="强力卖出<br>%{x}<extra></extra>",
         ),
@@ -353,7 +358,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
     if not strong_buys.empty:
         rb = strong_buys.iloc[-1]
         fig.add_annotation(
-            x=rb["date"].strftime("%Y-%m-%d"),
+            x=rb["date"],
             y=float(rb["low"]) * 0.992,
             text="强力买入",
             showarrow=True,
@@ -369,7 +374,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
     if not strong_sells.empty:
         rs = strong_sells.iloc[-1]
         fig.add_annotation(
-            x=rs["date"].strftime("%Y-%m-%d"),
+            x=rs["date"],
             y=float(rs["high"]) * 1.008,
             text="强力卖出",
             showarrow=True,
@@ -386,7 +391,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
     if not ob.empty:
         fig.add_trace(
             go.Scatter(
-                x=ob["date"].dt.strftime("%Y-%m-%d"),
+                x=ob["date"],
                 y=ob["high"] * 1.01,
                 mode="markers",
                 marker=dict(size=6, color="#FF9800", symbol="circle"),
@@ -457,7 +462,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
 
     # 只保留统一的共享X轴，禁用rangeslider，避免在多子图中叠层导致可读性崩坏
     fig.update_xaxes(
-        type="category",
+        type="date",
         showgrid=False,
         rangeslider_visible=False,
         fixedrange=False,
@@ -822,7 +827,18 @@ def main() -> None:
         table_rows.append(latest_summary_row(code, calc))
 
     if selected in data_map:
-        suggestion = get_action_suggestion(data_map[selected].iloc[-1])
+        selected_df = data_map[selected]
+        recent = selected_df.tail(5)
+        if recent.get("strong_sell_signal", pd.Series(False)).any():
+            suggestion = "强力减仓"
+        elif recent.get("strong_buy_signal", pd.Series(False)).any():
+            suggestion = "强力关注买点"
+        elif recent.get("sell_signal", pd.Series(False)).any():
+            suggestion = "减仓"
+        elif recent.get("buy_signal", pd.Series(False)).any():
+            suggestion = "关注买点"
+        else:
+            suggestion = get_action_suggestion(selected_df.iloc[-1])
         st.sidebar.markdown(
             f"<h2 style='color:#00E5FF;margin-top:8px;'>当前操作建议：{suggestion}</h2>",
             unsafe_allow_html=True,
@@ -831,7 +847,7 @@ def main() -> None:
             f"<h2 style='color:#00E5FF;margin-bottom:0.5rem;'>{selected} 当前操作建议：{suggestion}</h2>",
             unsafe_allow_html=True,
         )
-        fig = build_figure(data_map[selected], selected, suggestion)
+        fig = build_figure(selected_df, selected, suggestion)
         st.plotly_chart(
             fig,
             use_container_width=True,
