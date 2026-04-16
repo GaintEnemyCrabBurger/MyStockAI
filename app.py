@@ -4,7 +4,6 @@ import os
 
 import akshare as ak
 import pandas as pd
-import pandas_ta as ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
@@ -174,28 +173,30 @@ def compute_indicators(
     macd_signal: int,
 ) -> pd.DataFrame:
     out = df.copy()
-    out["MA5"] = ta.sma(out["close"], length=5)
-    out["MA10"] = ta.sma(out["close"], length=10)
-    out["MA20"] = ta.sma(out["close"], length=20)
+    out["MA5"] = out["close"].rolling(window=5, min_periods=1).mean()
+    out["MA10"] = out["close"].rolling(window=10, min_periods=1).mean()
+    out["MA20"] = out["close"].rolling(window=20, min_periods=1).mean()
 
-    kdj = ta.stoch(
-        high=out["high"],
-        low=out["low"],
-        close=out["close"],
-        k=kdj_k,
-        d=kdj_d,
-        smooth_k=kdj_smooth,
-    )
-    out["K"] = kdj.get(f"STOCHk_{kdj_k}_{kdj_d}_{kdj_smooth}")
-    out["D"] = kdj.get(f"STOCHd_{kdj_k}_{kdj_d}_{kdj_smooth}")
+    ll = out["low"].rolling(window=kdj_k, min_periods=1).min()
+    hh = out["high"].rolling(window=kdj_k, min_periods=1).max()
+    rsv = ((out["close"] - ll) / (hh - ll).replace(0, pd.NA) * 100).fillna(50)
+    out["K"] = rsv.ewm(alpha=1 / max(kdj_smooth, 1), adjust=False).mean()
+    out["D"] = out["K"].ewm(alpha=1 / max(kdj_d, 1), adjust=False).mean()
     out["J"] = 3 * out["K"] - 2 * out["D"]
 
-    out["RSI6"] = ta.rsi(out["close"], length=rsi_length)
+    delta = out["close"].diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    avg_gain = gain.ewm(alpha=1 / max(rsi_length, 1), adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / max(rsi_length, 1), adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    out["RSI6"] = (100 - (100 / (1 + rs))).fillna(50)
 
-    macd = ta.macd(out["close"], fast=macd_fast, slow=macd_slow, signal=macd_signal)
-    out["MACD"] = macd.get(f"MACD_{macd_fast}_{macd_slow}_{macd_signal}")
-    out["MACD_SIGNAL"] = macd.get(f"MACDs_{macd_fast}_{macd_slow}_{macd_signal}")
-    out["MACD_HIST"] = macd.get(f"MACDh_{macd_fast}_{macd_slow}_{macd_signal}")
+    ema_fast = out["close"].ewm(span=macd_fast, adjust=False).mean()
+    ema_slow = out["close"].ewm(span=macd_slow, adjust=False).mean()
+    out["MACD"] = ema_fast - ema_slow
+    out["MACD_SIGNAL"] = out["MACD"].ewm(span=macd_signal, adjust=False).mean()
+    out["MACD_HIST"] = out["MACD"] - out["MACD_SIGNAL"]
 
     return out
 
