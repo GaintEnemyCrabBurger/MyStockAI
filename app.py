@@ -1,10 +1,11 @@
 import warnings
 from datetime import datetime, timedelta, date
 import os
+import json
 
 import akshare as ak
 import pandas as pd
-import yfinance as yf
+import pandas_ta as ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
@@ -12,64 +13,70 @@ import streamlit as st
 warnings.filterwarnings("ignore")
 
 
-DEFAULT_CODES = ["09992", "01114"]
-APP_VERSION = "v3.4"
-SENSITIVITY_OPTIONS = [str(i) for i in range(1, 11)] + ["手动微调"]
+DEFAULT_CODES = ["09992", "01810"]
+APP_VERSION = "v3.5-local"
+SENSITIVITY_OPTIONS = [str(i) for i in range(1, 11)] + ["自定义"]
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_settings.json")
 
 
-def normalize_code(code: str) -> str:
-    code = str(code).strip().upper().replace(".HK", "").replace("HK", "")
-    digits = "".join(ch for ch in code if ch.isdigit())
-    return digits.zfill(5) if digits else ""
+def detect_and_normalize(raw: str) -> tuple[str, str]:
+    """根据位数自动识别市场，返回 (market, code)。
+    6 位数字 → A 股；其余 → 港股（补零到 5 位）。
+    """
+    raw = str(raw).strip().upper()
+    # 去掉常见后缀
+    for s in (".HK", ".SH", ".SZ"):
+        raw = raw.replace(s, "")
+    digits = "".join(c for c in raw if c.isdigit())
+    if len(digits) == 6:
+        return "A", digits
+    hk = digits.zfill(5) if digits else ""
+    return "HK", hk
 
 
-def get_preset(level: str) -> dict:
-    lv = int(level)
-    if 1 <= lv <= 3:
-        return {
-            "kdj_k": 18,
-            "kdj_d": 3,
-            "kdj_smooth": 3,
-            "rsi_length": 24,
-            "macd_fast": 26,
-            "macd_slow": 52,
-            "macd_signal": 18,
-            "kdj_low": 20,
-            "kdj_high": 80,
-            "rsi_low": 25,
-            "rsi_high": 75,
-        }
-    if 4 <= lv <= 7:
-        return {
-            "kdj_k": 9,
-            "kdj_d": 3,
-            "kdj_smooth": 3,
-            "rsi_length": 14,
-            "macd_fast": 12,
-            "macd_slow": 26,
-            "macd_signal": 9,
-            "kdj_low": 20,
-            "kdj_high": 80,
-            "rsi_low": 30,
-            "rsi_high": 70,
-        }
+def load_user_settings() -> dict:
+    if not os.path.exists(SETTINGS_FILE):
+        return {}
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_user_settings(data: dict) -> None:
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _lerp_int(v1: int, v10: int, level: int) -> int:
+    ratio = (level - 1) / 9
+    return int(round(v1 + (v10 - v1) * ratio))
+
+
+def get_dynamic_params(level: int) -> dict:
+    level = max(1, min(10, int(level)))
     return {
-        "kdj_k": 5,
-        "kdj_d": 3,
-        "kdj_smooth": 3,
-        "rsi_length": 6,
-        "macd_fast": 6,
-        "macd_slow": 13,
-        "macd_signal": 5,
-        "kdj_low": 35,
-        "kdj_high": 65,
-        "rsi_low": 35,
-        "rsi_high": 65,
+        "kdj_k": _lerp_int(18, 5, level),
+        "kdj_d": _lerp_int(3, 2, level),
+        "kdj_smooth": _lerp_int(3, 2, level),
+        "rsi_length": _lerp_int(24, 6, level),
+        "macd_fast": _lerp_int(26, 6, level),
+        "macd_slow": _lerp_int(52, 13, level),
+        "macd_signal": _lerp_int(9, 5, level),
+        "rsi_low": _lerp_int(20, 45, level),
+        "rsi_high": _lerp_int(80, 55, level),
+        "kdj_low": 20,
+        "kdj_high": 80,
     }
 
 
 def apply_preset_to_state(level: str) -> None:
-    params = get_preset(level)
+    params = get_dynamic_params(int(level))
     st.session_state["updating_from_preset"] = True
     for k, v in params.items():
         st.session_state[k] = v
@@ -79,14 +86,14 @@ def apply_preset_to_state(level: str) -> None:
 
 def on_sensitivity_change() -> None:
     level = st.session_state.get("sensitivity_level", "5")
-    if level != "手动微调":
+    if level != "自定义":
         apply_preset_to_state(level)
 
 
 def on_expert_change() -> None:
     if st.session_state.get("updating_from_preset", False):
         return
-    st.session_state["sensitivity_level"] = "手动微调"
+    st.session_state["sensitivity_level"] = "自定义"
 
 
 @st.cache_data(ttl=300)
@@ -102,71 +109,21 @@ def fetch_hk_data(
     start_date = pd.to_datetime(start_dt).strftime("%Y%m%d")
     end_date = pd.to_datetime(end_dt).strftime("%Y%m%d")
 
-    # 优先走 yfinance：在云端通常更稳定，显著降低超时概率
+    proxy_keys = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
+    backup = {k: os.environ.get(k) for k in proxy_keys}
     try:
-        yf_symbol = f"{symbol}.HK"
-        yf_df = yf.download(
-            yf_symbol,
-            start=pd.to_datetime(start_dt).strftime("%Y-%m-%d"),
-            end=(pd.to_datetime(end_dt) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
-            interval="1d",
-            auto_adjust=False,
-            progress=False,
-            threads=False,
-            timeout=8,
-        )
-        if yf_df is not None and not yf_df.empty:
-            yf_df = yf_df.reset_index().rename(
-                columns={
-                    "Date": "date",
-                    "Open": "open",
-                    "High": "high",
-                    "Low": "low",
-                    "Close": "close",
-                    "Volume": "volume",
-                }
-            )
-            for c in ["open", "high", "low", "close", "volume"]:
-                if c in yf_df.columns:
-                    yf_df[c] = pd.to_numeric(yf_df[c], errors="coerce")
-            yf_df["date"] = pd.to_datetime(yf_df["date"])
-            yf_df = yf_df.dropna(subset=["date", "open", "high", "low", "close"]).sort_values("date").reset_index(drop=True)
-            yf_df = yf_df[(yf_df["date"] >= pd.to_datetime(start_dt)) & (yf_df["date"] <= pd.to_datetime(end_dt))]
-            if not yf_df.empty:
-                return yf_df
-    except Exception:
-        pass
-
-    proxy_keys = [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    ]
-    backup_proxy = {k: os.environ.get(k) for k in proxy_keys}
-    try:
-        # 部分环境下系统代理会导致 akshare 请求失败，临时禁用可提高稳定性
         for k in proxy_keys:
             os.environ.pop(k, None)
-        df = ak.stock_hk_hist(
-            symbol=symbol,
-            period=period,
-            start_date=start_date,
-            end_date=end_date,
-            adjust=adjust,
-        )
+        df = ak.stock_hk_hist(symbol=symbol, period=period, start_date=start_date, end_date=end_date, adjust=adjust)
     except Exception:
         df = pd.DataFrame()
     finally:
-        for k, v in backup_proxy.items():
+        for k, v in backup.items():
             if v:
                 os.environ[k] = v
             else:
                 os.environ.pop(k, None)
 
-    # yfinance 不可用时，降级到 akshare
     if df is None or df.empty:
         try:
             df = ak.stock_hk_daily(symbol=symbol, adjust=adjust)
@@ -176,14 +133,7 @@ def fetch_hk_data(
     if df is None or df.empty:
         return pd.DataFrame()
 
-    rename_map = {
-        "日期": "date",
-        "开盘": "open",
-        "收盘": "close",
-        "最高": "high",
-        "最低": "low",
-        "成交量": "volume",
-    }
+    rename_map = {"日期": "date", "开盘": "open", "收盘": "close", "最高": "high", "最低": "low", "成交量": "volume"}
     df = df.rename(columns=rename_map)
     if "date" not in df.columns and df.index.name is not None and "date" in str(df.index.name).lower():
         df = df.reset_index()
@@ -199,6 +149,45 @@ def fetch_hk_data(
     return df
 
 
+@st.cache_data(ttl=300)
+def fetch_a_data(
+    symbol: str,
+    adjust: str = "qfq",
+    period: str = "daily",
+    backtest_start_date: date | None = None,
+    backtest_end_date: date | None = None,
+) -> pd.DataFrame:
+    start_dt = backtest_start_date or (datetime.now() - timedelta(days=365)).date()
+    end_dt = backtest_end_date or datetime.now().date()
+    start_date = pd.to_datetime(start_dt).strftime("%Y%m%d")
+    end_date = pd.to_datetime(end_dt).strftime("%Y%m%d")
+    try:
+        df = ak.stock_zh_a_hist(symbol=symbol, period=period, start_date=start_date, end_date=end_date, adjust=adjust)
+    except Exception:
+        return pd.DataFrame()
+    if df is None or df.empty:
+        return pd.DataFrame()
+    rename_map = {"日期": "date", "开盘": "open", "收盘": "close", "最高": "high", "最低": "low", "成交量": "volume"}
+    df = df.rename(columns=rename_map)
+    df["date"] = pd.to_datetime(df["date"])
+    for c in ["open", "high", "low", "close", "volume"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["date", "open", "high", "low", "close"]).sort_values("date").reset_index(drop=True)
+    return df
+
+
+def fetch_stock_data(
+    code: str,
+    market: str,
+    backtest_start_date: date | None = None,
+    backtest_end_date: date | None = None,
+) -> pd.DataFrame:
+    if market == "A":
+        return fetch_a_data(code, backtest_start_date=backtest_start_date, backtest_end_date=backtest_end_date)
+    return fetch_hk_data(code, backtest_start_date=backtest_start_date, backtest_end_date=backtest_end_date)
+
+
 def compute_indicators(
     df: pd.DataFrame,
     kdj_k: int,
@@ -210,36 +199,35 @@ def compute_indicators(
     macd_signal: int,
 ) -> pd.DataFrame:
     out = df.copy()
-    out["MA5"] = out["close"].rolling(window=5, min_periods=1).mean()
-    out["MA10"] = out["close"].rolling(window=10, min_periods=1).mean()
-    out["MA20"] = out["close"].rolling(window=20, min_periods=1).mean()
+    out["MA5"] = ta.sma(out["close"], length=5)
+    out["MA10"] = ta.sma(out["close"], length=10)
+    out["MA20"] = ta.sma(out["close"], length=20)
 
-    ll = out["low"].rolling(window=kdj_k, min_periods=1).min()
-    hh = out["high"].rolling(window=kdj_k, min_periods=1).max()
-    rsv = ((out["close"] - ll) / (hh - ll).replace(0, pd.NA) * 100).fillna(50)
-    out["K"] = rsv.ewm(alpha=1 / max(kdj_smooth, 1), adjust=False).mean()
-    out["D"] = out["K"].ewm(alpha=1 / max(kdj_d, 1), adjust=False).mean()
+    kdj = ta.stoch(
+        high=out["high"],
+        low=out["low"],
+        close=out["close"],
+        k=kdj_k,
+        d=kdj_d,
+        smooth_k=kdj_smooth,
+    )
+    out["K"] = kdj.get(f"STOCHk_{kdj_k}_{kdj_d}_{kdj_smooth}")
+    out["D"] = kdj.get(f"STOCHd_{kdj_k}_{kdj_d}_{kdj_smooth}")
     out["J"] = 3 * out["K"] - 2 * out["D"]
 
-    delta = out["close"].diff()
-    gain = delta.clip(lower=0)
-    loss = (-delta).clip(lower=0)
-    avg_gain = gain.ewm(alpha=1 / max(rsi_length, 1), adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / max(rsi_length, 1), adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, pd.NA)
-    out["RSI6"] = (100 - (100 / (1 + rs))).fillna(50)
+    out["RSI6"] = ta.rsi(out["close"], length=rsi_length)
 
-    ema_fast = out["close"].ewm(span=macd_fast, adjust=False).mean()
-    ema_slow = out["close"].ewm(span=macd_slow, adjust=False).mean()
-    out["MACD"] = ema_fast - ema_slow
-    out["MACD_SIGNAL"] = out["MACD"].ewm(span=macd_signal, adjust=False).mean()
-    out["MACD_HIST"] = out["MACD"] - out["MACD_SIGNAL"]
+    macd = ta.macd(out["close"], fast=macd_fast, slow=macd_slow, signal=macd_signal)
+    out["MACD"] = macd.get(f"MACD_{macd_fast}_{macd_slow}_{macd_signal}")
+    out["MACD_SIGNAL"] = macd.get(f"MACDs_{macd_fast}_{macd_slow}_{macd_signal}")
+    out["MACD_HIST"] = macd.get(f"MACDh_{macd_fast}_{macd_slow}_{macd_signal}")
 
     return out
 
 
 def calculate_signals(
     df: pd.DataFrame,
+    sensitivity_level: int | str = 5,
     kdj_low: int = 20,
     kdj_high: int = 80,
     rsi_low: int = 30,
@@ -260,8 +248,32 @@ def calculate_signals(
     low_stay = low_zone.rolling(stay_days, min_periods=stay_days).sum().shift(1) >= stay_days
     high_stay = high_zone.rolling(stay_days, min_periods=stay_days).sum().shift(1) >= stay_days
 
-    raw_buy = low_stay & out["j_turn_up"] & out["golden_cross"] & out["macd_green_shrinking"]
-    raw_sell = high_stay & out["j_turn_down"] & out["dead_cross"]
+    kdj_buy = low_stay & out["j_turn_up"] & out["golden_cross"]
+    rsi_buy = out["RSI6"] <= rsi_low
+    macd_buy = out["macd_green_shrinking"] | (out["MACD"] > out["MACD_SIGNAL"])
+
+    macd_red_shrinking = (out["MACD_HIST"] > 0) & (prev_hist > 0) & (out["MACD_HIST"] < prev_hist)
+    kdj_sell = high_stay & out["j_turn_down"] & out["dead_cross"]
+    rsi_sell = out["RSI6"] >= rsi_high
+    macd_sell = macd_red_shrinking | (out["MACD"] < out["MACD_SIGNAL"])
+
+    if str(sensitivity_level) == "自定义":
+        lv = 5
+    else:
+        lv = int(sensitivity_level)
+
+    buy_votes = kdj_buy.astype(int) + rsi_buy.astype(int) + macd_buy.astype(int)
+    sell_votes = kdj_sell.astype(int) + rsi_sell.astype(int) + macd_sell.astype(int)
+    if lv <= 3:
+        raw_buy = buy_votes >= 3
+        raw_sell = sell_votes >= 3
+    elif lv <= 7:
+        raw_buy = buy_votes >= 2
+        raw_sell = sell_votes >= 2
+    else:
+        raw_buy = buy_votes >= 1
+        raw_sell = sell_votes >= 1
+
     out["buy_signal"] = raw_buy & (~raw_buy.shift(1).fillna(False))
     out["sell_signal"] = raw_sell & (~raw_sell.shift(1).fillna(False))
     out["strong_buy_signal"] = out["buy_signal"] & (out["RSI6"] < max(rsi_low - 5, 10)) & (out["J"] < max(kdj_low - 5, 5))
@@ -289,7 +301,7 @@ def get_action_suggestion(last: pd.Series) -> str:
 
 
 def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
-    x_vals = df["date"]
+    x_vals = df["date"].dt.strftime("%Y-%m-%d")
     j_plot = df["J"]
     price_min = float(df["low"].min())
     price_max = float(df["high"].max())
@@ -323,8 +335,8 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
             low=df["low"],
             close=df["close"],
             name="K线",
-            increasing_line_color="#26A69A",
-            decreasing_line_color="#EF5350",
+            increasing_line_color="#E53935",
+            decreasing_line_color="#2E7D32",
         ),
         row=1,
         col=1,
@@ -340,7 +352,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
     ob = df[df["overbought"]]
     fig.add_trace(
         go.Scatter(
-            x=buys["date"],
+            x=buys["date"].dt.strftime("%Y-%m-%d"),
             y=buys["low"] * 0.996,
             mode="markers",
             marker=dict(size=10, color="#2E7D32", symbol="triangle-up", line=dict(width=1, color="#1B5E20")),
@@ -352,7 +364,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
     )
     fig.add_trace(
         go.Scatter(
-            x=sells["date"],
+            x=sells["date"].dt.strftime("%Y-%m-%d"),
             y=sells["high"] * 1.004,
             mode="markers",
             marker=dict(size=10, color="#C62828", symbol="triangle-down", line=dict(width=1, color="#7F0000")),
@@ -364,7 +376,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
     )
     fig.add_trace(
         go.Scatter(
-            x=strong_buys["date"],
+            x=strong_buys["date"].dt.strftime("%Y-%m-%d"),
             y=strong_buys["low"] * 0.992,
             mode="markers+text",
             text=["强买"] * len(strong_buys),
@@ -379,7 +391,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
     )
     fig.add_trace(
         go.Scatter(
-            x=strong_sells["date"],
+            x=strong_sells["date"].dt.strftime("%Y-%m-%d"),
             y=strong_sells["high"] * 1.008,
             mode="markers+text",
             text=["强卖"] * len(strong_sells),
@@ -395,7 +407,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
     if not strong_buys.empty:
         rb = strong_buys.iloc[-1]
         fig.add_annotation(
-            x=rb["date"],
+            x=rb["date"].strftime("%Y-%m-%d"),
             y=float(rb["low"]) * 0.992,
             text="强力买入",
             showarrow=True,
@@ -411,7 +423,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
     if not strong_sells.empty:
         rs = strong_sells.iloc[-1]
         fig.add_annotation(
-            x=rs["date"],
+            x=rs["date"].strftime("%Y-%m-%d"),
             y=float(rs["high"]) * 1.008,
             text="强力卖出",
             showarrow=True,
@@ -428,7 +440,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
     if not ob.empty:
         fig.add_trace(
             go.Scatter(
-                x=ob["date"],
+                x=ob["date"].dt.strftime("%Y-%m-%d"),
                 y=ob["high"] * 1.01,
                 mode="markers",
                 marker=dict(size=6, color="#FF9800", symbol="circle"),
@@ -438,6 +450,23 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
             row=1,
             col=1,
         )
+
+    # 图表备注：帮助快速识别信号语义
+    fig.add_annotation(
+        x=0.01,
+        y=0.99,
+        xref="paper",
+        yref="paper",
+        xanchor="left",
+        yanchor="top",
+        align="left",
+        text="▲ 买入  ▼ 卖出  ◆ 强力卖出  ★ 强力买入  ● 超买预警",
+        showarrow=False,
+        font=dict(size=11, color="#263238"),
+        bgcolor="rgba(255,255,255,0.92)",
+        bordercolor="#B0BEC5",
+        borderwidth=1,
+    )
 
     fig.add_trace(
         go.Scatter(x=x_vals, y=df["K"], name="K", connectgaps=False, line=dict(color="#29B6F6", width=1.6)),
@@ -483,7 +512,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
             x=x_vals,
             y=df["MACD_HIST"],
             name="MACD_HIST",
-            marker_color=df["MACD_HIST"].apply(lambda v: "#26A69A" if v >= 0 else "#EF5350"),
+            marker_color=df["MACD_HIST"].apply(lambda v: "#E53935" if v >= 0 else "#2E7D32"),
             opacity=0.5,
         ),
         row=3,
@@ -499,7 +528,7 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
 
     # 只保留统一的共享X轴，禁用rangeslider，避免在多子图中叠层导致可读性崩坏
     fig.update_xaxes(
-        type="date",
+        type="category",
         showgrid=False,
         rangeslider_visible=False,
         fixedrange=False,
@@ -563,26 +592,6 @@ def build_figure(df: pd.DataFrame, symbol: str, suggestion: str) -> go.Figure:
     return fig
 
 
-def latest_summary_row(symbol: str, df: pd.DataFrame) -> dict:
-    last = df.iloc[-1]
-    return {
-        "代码": symbol,
-        "日期": last["date"].strftime("%Y-%m-%d"),
-        "收盘": round(float(last["close"]), 3),
-        "K": round(float(last["K"]), 3) if pd.notna(last["K"]) else None,
-        "D": round(float(last["D"]), 3) if pd.notna(last["D"]) else None,
-        "J": round(float(last["J"]), 3) if pd.notna(last["J"]) else None,
-        "RSI6": round(float(last["RSI6"]), 3) if pd.notna(last["RSI6"]) else None,
-        "MACD": round(float(last["MACD"]), 3) if pd.notna(last["MACD"]) else None,
-        "MACD_SIGNAL": round(float(last["MACD_SIGNAL"]), 3) if pd.notna(last["MACD_SIGNAL"]) else None,
-        "MACD_HIST": round(float(last["MACD_HIST"]), 3) if pd.notna(last["MACD_HIST"]) else None,
-        "建议": get_action_suggestion(last),
-        "买入信号": "是" if bool(last["buy_signal"]) else "否",
-        "卖出信号": "是" if bool(last["sell_signal"]) else "否",
-        "风险预警": "超买" if bool(last["overbought"]) else "-",
-    }
-
-
 def calculate_trade_stats(df: pd.DataFrame) -> dict:
     work = df.copy()
     if "date" not in work.columns or "close" not in work.columns:
@@ -599,9 +608,20 @@ def calculate_trade_stats(df: pd.DataFrame) -> dict:
     dates = work["date"]
     buy_mask = work["buy_signal"].fillna(False).astype(bool)
     sell_mask = work["sell_signal"].fillna(False).astype(bool)
-    if buy_mask.any():
-        first_buy_idx = int(buy_mask[buy_mask].index[0])
-        sell_mask.iloc[:first_buy_idx] = False
+
+    # 严格交替执行：空仓只接受买入，持仓只接受卖出，自动屏蔽冗余同类信号
+    valid_buy = pd.Series(False, index=work.index)
+    valid_sell = pd.Series(False, index=work.index)
+    has_position = False
+    for i in work.index:
+        if not has_position:
+            if bool(buy_mask.loc[i]):
+                valid_buy.loc[i] = True
+                has_position = True
+        else:
+            if bool(sell_mask.loc[i]):
+                valid_sell.loc[i] = True
+                has_position = False
 
     equity = 1.0
     shares = 0.0
@@ -614,7 +634,7 @@ def calculate_trade_stats(df: pd.DataFrame) -> dict:
 
     for i in range(len(work)):
         # 进场：只要当天出现 buy_signal，就认为按当日收盘价全仓买入
-        if (not in_pos) and bool(buy_mask.iloc[i]):
+        if (not in_pos) and bool(valid_buy.iloc[i]):
             entry_close = float(close.iloc[i])
             if entry_close > 1e-6:
                 shares = equity / entry_close
@@ -626,7 +646,7 @@ def calculate_trade_stats(df: pd.DataFrame) -> dict:
             equity_today = shares * float(close.iloc[i])
 
             # 出场：只要当天出现 sell_signal，就按当日收盘价全仓卖出
-            if bool(sell_mask.iloc[i]):
+            if bool(valid_sell.iloc[i]):
                 exit_close = float(close.iloc[i])
                 if exit_close > 1e-6 and entry_close is not None and entry_idx is not None:
                     ret = exit_close / entry_close - 1.0
@@ -737,12 +757,30 @@ def calculate_trade_stats(df: pd.DataFrame) -> dict:
 
 
 def main() -> None:
-    st.set_page_config(page_title="港股量化看板", layout="wide")
-    st.title(f"港股量化可视化看板 {APP_VERSION}")
+    st.set_page_config(page_title="港A股量化看板", layout="wide")
+    st.markdown(
+        """
+        <style>
+        .stApp { background-color: #FFFFFF; color: #263238; }
+        [data-testid="stSidebar"] { background-color: #F7F9FC; }
+        [data-testid="stHeader"] { background-color: #FFFFFF; }
+        [data-testid="stToolbar"] { background-color: #FFFFFF; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.title(f"港A股量化可视化看板 {APP_VERSION}")
+
+    if "settings_loaded" not in st.session_state:
+        settings = load_user_settings()
+        st.session_state["input_codes_text"] = settings.get("input_codes_text", ",".join(DEFAULT_CODES))
+        st.session_state["settings_loaded"] = True
     if "sensitivity_level" not in st.session_state:
         apply_preset_to_state("5")
     if "updating_from_preset" not in st.session_state:
         st.session_state["updating_from_preset"] = False
+    if st.session_state.get("sensitivity_level") == "手动微调":
+        st.session_state["sensitivity_level"] = "自定义"
 
     st.sidebar.markdown("## 策略预设")
     st.sidebar.select_slider(
@@ -751,12 +789,16 @@ def main() -> None:
         key="sensitivity_level",
         on_change=on_sensitivity_change,
     )
-    tip_map = {
-        "1": "老僧入定模式：信号极少，追求绝对安全",
-        "10": "短线刺客模式：信号极多，小心虚假波动",
-        "手动微调": "手动微调模式：你正在覆盖预设参数",
-    }
-    st.sidebar.caption(tip_map.get(st.session_state["sensitivity_level"], "均衡交易模式：稳健与效率兼顾"))
+    if st.session_state["sensitivity_level"] == "自定义":
+        st.sidebar.caption("自定义：你正在手动覆盖线性灵敏度参数。")
+    else:
+        lv = int(st.session_state["sensitivity_level"])
+        if lv <= 3:
+            st.sidebar.caption("防守型：寻找历史级的确定性机会。")
+        elif lv <= 7:
+            st.sidebar.caption("平衡型：在噪音与趋势中寻找共识。")
+        else:
+            st.sidebar.caption("进攻型：对每一个微小波动做出反应。")
 
     with st.sidebar.expander("专家参数（默认隐藏）", expanded=False):
         st.slider("KDJ 周期 K", 5, 30, key="kdj_k", on_change=on_expert_change)
@@ -789,11 +831,19 @@ def main() -> None:
         st.session_state["backtest_end_date"] = st.session_state["backtest_start_date"]
 
     with st.sidebar.expander("策略逻辑说明（点击展开）", expanded=False):
+        lv_now = st.session_state.get("sensitivity_level", "5")
+        votes_needed = 3 if str(lv_now) not in ["自定义"] and int(lv_now) <= 3 else (1 if str(lv_now) not in ["自定义"] and int(lv_now) >= 8 else 2)
         st.markdown(
-            f"- 买入准则：超卖区连续停留超过2天后出现拐点，且KDJ金叉 + MACD负柱缩短\n"
-            f"- 卖出准则：超买区连续停留超过2天后出现拐点，且KDJ死叉\n"
-            f"- 中性区：指标在50附近波动时，一律显示`观望`\n"
-            f"- 当前参数：KDJ({st.session_state['kdj_k']},{st.session_state['kdj_d']},{st.session_state['kdj_smooth']}) / "
+            f"**三指标投票制**（当前灵敏度={lv_now}，需 {votes_needed}/3 票触发）\n\n"
+            f"**买入票（需 {votes_needed} 票同时满足）：**\n"
+            f"- KDJ票：J & RSI 同时低于超卖阈值，连续满足 ≥2 天后，J 向上拐且 KDJ 金叉\n"
+            f"- RSI票：RSI 跌破低阈值（{st.session_state['rsi_low']}）\n"
+            f"- MACD票：MACD 负柱缩短，或 MACD 线上穿信号线\n\n"
+            f"**卖出票（需 {votes_needed} 票同时满足）：**\n"
+            f"- KDJ票：J & RSI 同时高于超买阈值，连续满足 ≥2 天后，J 向下拐且 KDJ 死叉\n"
+            f"- RSI票：RSI 突破高阈值（{st.session_state['rsi_high']}）\n"
+            f"- MACD票：MACD 正柱缩短，或 MACD 线下穿信号线\n\n"
+            f"当前参数：KDJ({st.session_state['kdj_k']},{st.session_state['kdj_d']},{st.session_state['kdj_smooth']}) / "
             f"RSI({st.session_state['rsi_length']}) / "
             f"MACD({st.session_state['macd_fast']},{st.session_state['macd_slow']},{st.session_state['macd_signal']}) / "
             f"阈值 KDJ({st.session_state['kdj_low']}/{st.session_state['kdj_high']}) RSI({st.session_state['rsi_low']}/{st.session_state['rsi_high']})"
@@ -801,46 +851,65 @@ def main() -> None:
 
     with st.sidebar.expander("回测逻辑说明（点击展开）", expanded=False):
         st.markdown(
-            "- 回测输入：使用当前参数下生成的 `buy_signal` 与 `sell_signal`\n"
-            "- 成交规则：信号当日收盘价成交（买入/卖出）\n"
-            "- 首单规则：第一笔必须是买入，第一买点前的卖点全部忽略\n"
-            "- 闭环规则：买入后等待卖出；若到结束日仍持仓，则以结束日收盘价强平\n"
-            "- 净值规则：策略净值与基准净值均从回测起始日的 `1.0` 起步，对齐比较\n"
-            "- 风险检查：若出现异常高收益但标的未明显翻倍，会触发收益有效性警告"
+            "- 信号来源：使用当前参数生成的 `buy_signal` / `sell_signal`\n"
+            "- 成交规则：信号当日**收盘价**买入或卖出（不含滑点/手续费）\n"
+            "- 首单规则：必须先买后卖，第一个买点前的卖点全部忽略\n"
+            "- 持仓规则：严格交替——空仓只接受买入，持仓只接受卖出\n"
+            "- 强平规则：回测结束日仍持仓时，以结束日收盘价强制平仓\n"
+            "- 净值起点：策略净值与基准净值均从回测起始日 `1.0` 出发对齐比较\n"
+            "- 风险检查：策略收益异常高而标的未明显翻倍时触发警告"
         )
 
     default_text = st.session_state.get("input_codes_text", ",".join(DEFAULT_CODES))
     with st.sidebar.form("stock_control_form"):
-        input_text = st.text_input("输入港股代码（逗号分隔）", value=default_text)
+        input_text = st.text_input(
+            "输入股票代码（逗号分隔）",
+            value=default_text,
+            help="港股输入5位或4位代码（如 01810），A股输入6位代码（如 600519），自动识别市场",
+        )
         submitted = st.form_submit_button("更新数据并计算", use_container_width=True, type="primary")
 
     if submitted:
         st.session_state["run_analysis"] = True
         st.session_state["input_codes_text"] = input_text
+        save_user_settings({"input_codes_text": input_text})
 
     if not st.session_state.get("run_analysis", False):
-        st.info("请在左侧侧边栏输入代码并点击“更新数据并计算”。")
+        st.info("请在左侧输入股票代码并点击「更新数据并计算」。\n\n港股示例：01810, 09992  |  A股示例：600519, 000001")
         return
 
-    text = st.session_state.get("input_codes_text", ",".join(DEFAULT_CODES))
-    codes = [normalize_code(x) for x in text.split(",")]
-    codes = [c for c in codes if c] or DEFAULT_CODES
-    selected = st.selectbox("主图展示代码", options=codes, index=0)
+    raw_codes = [x.strip() for x in st.session_state.get("input_codes_text", ",".join(DEFAULT_CODES)).split(",") if x.strip()]
+    parsed = []
+    for raw in raw_codes:
+        market, code = detect_and_normalize(raw)
+        if code:
+            parsed.append((market, code))
+    if not parsed:
+        st.error("未识别到有效代码，请重新输入。")
+        return
 
-    data_map = {}
-    table_rows = []
+    display_labels = {(m, c): f"{c}（{'A股' if m == 'A' else '港股'}）" for m, c in parsed}
+    selected_label = st.selectbox(
+        "主图展示",
+        options=list(display_labels.values()),
+        index=0,
+    )
+    selected_pair = next((k for k, v in display_labels.items() if v == selected_label), parsed[0])
 
-    for code in codes:
-        raw = fetch_hk_data(
-            code,
+    data_map: dict[tuple[str, str], pd.DataFrame] = {}
+
+    for market, code in parsed:
+        raw_df = fetch_stock_data(
+            code, market,
             backtest_start_date=st.session_state["backtest_start_date"],
             backtest_end_date=st.session_state["backtest_end_date"],
         )
-        if raw.empty:
-            st.warning(f"{code} 无可用数据")
+        label = display_labels[(market, code)]
+        if raw_df.empty:
+            st.warning(f"{label} 无可用数据")
             continue
         calc = compute_indicators(
-            raw,
+            raw_df,
             kdj_k=st.session_state["kdj_k"],
             kdj_d=st.session_state["kdj_d"],
             kdj_smooth=st.session_state["kdj_smooth"],
@@ -851,6 +920,7 @@ def main() -> None:
         )
         calc = calculate_signals(
             calc,
+            sensitivity_level=st.session_state["sensitivity_level"],
             kdj_low=st.session_state["kdj_low"],
             kdj_high=st.session_state["kdj_high"],
             rsi_low=st.session_state["rsi_low"],
@@ -858,13 +928,13 @@ def main() -> None:
             stay_days=2,
         )
         if calc.empty:
-            st.warning(f"{code} 指标计算后无有效数据")
+            st.warning(f"{label} 指标计算后无有效数据")
             continue
-        data_map[code] = calc
-        table_rows.append(latest_summary_row(code, calc))
+        data_map[(market, code)] = calc
 
-    if selected in data_map:
-        selected_df = data_map[selected]
+    if selected_pair in data_map:
+        selected_df = data_map[selected_pair]
+        selected_label_str = display_labels[selected_pair]
         recent = selected_df.tail(5)
         if recent.get("strong_sell_signal", pd.Series(False)).any():
             suggestion = "强力减仓"
@@ -881,10 +951,10 @@ def main() -> None:
             unsafe_allow_html=True,
         )
         st.markdown(
-            f"<h2 style='color:#00E5FF;margin-bottom:0.5rem;'>{selected} 当前操作建议：{suggestion}</h2>",
+            f"<h2 style='color:#00E5FF;margin-bottom:0.5rem;'>{selected_label_str} 当前操作建议：{suggestion}</h2>",
             unsafe_allow_html=True,
         )
-        fig = build_figure(selected_df, selected, suggestion)
+        fig = build_figure(selected_df, selected_label_str, suggestion)
         st.plotly_chart(
             fig,
             use_container_width=True,
@@ -892,30 +962,17 @@ def main() -> None:
                 "scrollZoom": True,
                 "displaylogo": False,
                 "modeBarButtonsToRemove": [
-                    "zoom2d",
-                    "pan2d",
-                    "select2d",
-                    "lasso2d",
-                    "zoomIn2d",
-                    "zoomOut2d",
-                    "autoScale2d",
-                    "resetScale2d",
+                    "zoom2d", "pan2d", "select2d", "lasso2d",
+                    "zoomIn2d", "zoomOut2d", "autoScale2d", "resetScale2d",
                 ],
             },
         )
     else:
         st.error("主图代码暂无数据，无法展示。")
 
-    st.subheader("自选股指标汇总")
-    if table_rows:
-        table_df = pd.DataFrame(table_rows)
-        st.dataframe(table_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("暂无可展示的指标数据。")
-
     st.subheader("策略绩效看板（信号纯度回测）")
-    if selected in data_map:
-        perf = calculate_trade_stats(data_map[selected])
+    if selected_pair in data_map:
+        perf = calculate_trade_stats(data_map[selected_pair])
         if perf:
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("策略总收益率", f"{perf['策略总收益率(%)']:.2f}%")
@@ -924,18 +981,14 @@ def main() -> None:
             c4.metric("最大回撤", f"{perf['最大回撤(%)']:.2f}%")
             if perf.get("收益有效性检查", "通过") != "通过":
                 st.warning(perf["收益有效性检查"])
-
             st.plotly_chart(perf["策略净值曲线图"], use_container_width=True)
-
             with st.expander("历史交易清单（过去一年）", expanded=False):
                 trades_year = perf["交易清单过去一年"]
                 if trades_year is None or trades_year.empty:
                     st.info("过去一年无闭环交易。")
                 else:
                     st.dataframe(
-                        trades_year[
-                            ["买入日期", "买入价格", "卖出日期", "卖出价格", "单笔涨跌幅(%)", "持仓天数"]
-                        ],
+                        trades_year[["买入日期", "买入价格", "卖出日期", "卖出价格", "单笔涨跌幅(%)", "持仓天数"]],
                         use_container_width=True,
                         hide_index=True,
                     )

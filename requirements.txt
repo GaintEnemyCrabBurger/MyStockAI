@@ -1,6 +1,6 @@
 streamlit
 akshare
 pandas
-yfinance
+pandas_ta
 plotly
 requests
