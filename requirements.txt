@@ -1,23 +1,20 @@
 # ============================================================
 # MyStockAI dependencies
-# Target on Streamlit Cloud: Python 3.11 recommended
+# Works on any Python 3.9 - 3.13 without native build steps.
 # ============================================================
 
 # ---- Web UI ----
 streamlit>=1.32
 plotly>=5.18
 
-# ---- Data processing & technical analysis ----
-# IMPORTANT: pandas-ta (beta) relies on deprecated numpy APIs
-# (np.NaN, np.bool etc.) that were removed in numpy 2.x.
-# Pin numpy < 2 until pandas-ta ships a stable 0.4 release.
-numpy<2
-pandas>=1.5,<2.3
-# Use range instead of == to allow uv/pip to pick the 0.3.14b0 pre-release.
-# Upper bound <0.4 keeps the heavy numba-dependent 0.4.x line out.
-pandas-ta>=0.3.14b0,<0.4
+# ---- Data processing ----
+# Technical indicators (MA / KDJ / RSI / MACD) are implemented
+# in pure pandas inside core/indicators.py, so we intentionally
+# do NOT depend on pandas-ta / TA-Lib / numba.
+numpy>=1.23
+pandas>=1.5
 
-# ---- Market data source (A-shares / HK / US, all free public APIs) ----
+# ---- Market data source (A-shares / HK / US, free public APIs) ----
 akshare>=1.12
 
 # Notes:
