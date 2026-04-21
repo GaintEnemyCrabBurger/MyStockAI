@@ -17,7 +17,7 @@ import warnings
 
 import streamlit as st
 
-from config import APP_VERSION, DEFAULT_CODES, detect_and_normalize
+from config import APP_VERSION, DEFAULT_CODES, MARKET_LABELS, detect_and_normalize
 from core.backtest import run_backtest
 from core.data import fetch_stock_data
 from core.indicators import compute_indicators
@@ -33,7 +33,7 @@ warnings.filterwarnings("ignore")
 # ---------------------------------------------------------------------------
 
 def _setup_page() -> None:
-    st.set_page_config(page_title="港A股量化看板", layout="wide")
+    st.set_page_config(page_title="全球股票量化看板", layout="wide")
     # Apple HIG 风格：系统字体 / 柔和背景 / 卡片式布局 / 克制的色彩
     st.markdown(
         """
@@ -241,6 +241,36 @@ def _setup_page() -> None:
             padding: 0 !important;
             overflow: hidden;
         }
+
+        /* Multiselect：让输入区域即使有多个选中标签时也足够显眼 */
+        [data-testid="stSidebar"] [data-baseweb="select"] {
+            min-height: 48px;
+            padding: 6px 8px !important;
+            border-radius: 12px !important;
+            border: 1px solid var(--divider) !important;
+            background: var(--card) !important;
+            transition: border-color 0.15s ease, box-shadow 0.15s ease;
+        }
+        [data-testid="stSidebar"] [data-baseweb="select"]:focus-within {
+            border-color: var(--accent) !important;
+            box-shadow: 0 0 0 3px rgba(0,113,227,0.15) !important;
+        }
+        /* 已选标签：弱化红色,改成柔和中性色（避免看着像错误状态）*/
+        [data-testid="stSidebar"] [data-baseweb="tag"] {
+            background: #EEF3FF !important;
+            color: #1D1D1F !important;
+            border: 1px solid #D8E4FB !important;
+            border-radius: 8px !important;
+            margin: 3px 4px 3px 0 !important;
+        }
+        [data-testid="stSidebar"] [data-baseweb="tag"] span {
+            color: #1D1D1F !important;
+        }
+        /* 输入光标区域：保证可见高度 */
+        [data-testid="stSidebar"] [data-baseweb="select"] input {
+            min-height: 28px !important;
+            font-size: 0.95rem !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -249,10 +279,10 @@ def _setup_page() -> None:
     st.markdown(
         f"""
         <div class="app-hero">
-            <span class="title">港A股量化看板</span>
+            <span class="title">全球股票量化看板</span>
             <span class="version">{APP_VERSION}</span>
         </div>
-        <div class="app-subtitle">三指标投票制 · 信号纯度回测 · 支持港股与 A 股</div>
+        <div class="app-subtitle">三指标加权投票 · 信号纯度回测 · 支持 A 股 / 港股 / 美股</div>
         """,
         unsafe_allow_html=True,
     )
@@ -290,8 +320,10 @@ def main() -> None:
 
     if not st.session_state.get("run_analysis", False):
         st.info(
-            "请在左侧输入股票代码并点击「更新数据并计算」。\n\n"
-            "港股示例：01810, 09992  |  A股示例：600519, 000001"
+            "请在左侧「股票代码」框中选择或输入标的，然后点击「更新数据并计算」。\n\n"
+            "**一个框 · 三种用法**：直接输入中文名（苹果 / 茅台 / 腾讯）、英文名"
+            "（nvidia / tencent）或代码（600519 / 01810 / AAPL）即可搜索定位；"
+            "精选池未收录的代码也可直接键入后按 Enter 加入。"
         )
         return
 
@@ -311,35 +343,19 @@ def main() -> None:
         st.error("未识别到有效代码，请重新输入。")
         return
 
-    display_labels = {
-        (m, c): f"{c}（{'A股' if m == 'A' else '港股'}）"
-        for m, c in parsed
-    }
-
-    # ---- 主图股票选择 ----
-    selected_label = st.selectbox(
-        "主图展示",
-        options=list(display_labels.values()),
-        index=0,
-    )
-    selected_pair = next(
-        (k for k, v in display_labels.items() if v == selected_label), parsed[0]
-    )
-
-    # ---- 数据拉取 + 指标计算 + 信号生成 ----
+    # ---- 数据拉取 + 指标计算 + 信号生成（在选择主图之前完成,失败代码不阻断成功标的）----
     data_map: dict[tuple[str, str], object] = {}
+    failed: list[tuple[str, str, str]] = []  # (market, code, reason)
     ss = st.session_state
 
     for market, code in parsed:
-        label = display_labels[(market, code)]
-
         raw_df = fetch_stock_data(
             code, market,
             backtest_start_date=ss["backtest_start_date"],
             backtest_end_date=ss["backtest_end_date"],
         )
         if raw_df.empty:
-            st.warning(f"{label} 无可用数据")
+            failed.append((market, code, "数据源未返回行情（代码不存在或该区间无成交）"))
             continue
 
         calc = compute_indicators(
@@ -357,15 +373,44 @@ def main() -> None:
             stay_days=int(ss.get("stay_days", 2)),
         )
         if calc.empty:
-            st.warning(f"{label} 指标计算后无有效数据")
+            failed.append((market, code, "数据不足,指标计算为空"))
             continue
 
         data_map[(market, code)] = calc
 
-    # ---- 主图渲染 ----
-    if selected_pair not in data_map:
-        st.error("主图代码暂无数据，无法展示。")
+    # ---- 失败代码：折叠提示,不挡住成功标的的图表 ----
+    if failed:
+        fail_summary = "、".join(
+            f"`{c}`（{MARKET_LABELS.get(m, m)}）" for m, c, _ in failed
+        )
+        st.warning(
+            f"以下 {len(failed)} 个代码无可用数据：{fail_summary}。"
+            "建议在左侧**股票代码**输入框中键入公司中/英文名（如 “卡骆驰”→ `CROX`）"
+            "从下拉里选中正确代码。"
+        )
+        with st.expander(f"展开查看 {len(failed)} 个失败代码的详细原因", expanded=False):
+            for m, c, why in failed:
+                st.markdown(f"- **{c}**（{MARKET_LABELS.get(m, m)}）：{why}")
+
+    # ---- 如果全部失败,直接退出 ----
+    if not data_map:
+        st.error(
+            "所有代码都无可用数据。请检查输入——直接在左侧输入框里按公司名搜索"
+            "（苹果、茅台、腾讯等）是最可靠的做法。"
+        )
         return
+
+    # ---- 只在可用标的里让用户选主图 ----
+    display_labels = {
+        (m, c): f"{c}（{MARKET_LABELS.get(m, m)}）"
+        for m, c in data_map.keys()
+    }
+    viable_options = list(display_labels.values())
+    selected_label = st.selectbox("主图展示", options=viable_options, index=0)
+    selected_pair = next(
+        (k for k, v in display_labels.items() if v == selected_label),
+        next(iter(data_map.keys())),
+    )
 
     selected_df = data_map[selected_pair]
     selected_label_str = display_labels[selected_pair]
@@ -428,17 +473,52 @@ def main() -> None:
         """,
         unsafe_allow_html=True,
     )
-    perf = run_backtest(selected_df)
+    perf = run_backtest(selected_df, market=selected_pair[0])
 
     if not perf:
         st.info("暂无可统计数据。")
         return
 
+    # 工具：把可能的 NaN / None 转成可读字符串
+    def _fmt(v, tpl: str = "{:.2f}") -> str:
+        if v is None:
+            return "—"
+        try:
+            if v != v:
+                return "—"
+        except TypeError:
+            return "—"
+        return tpl.format(v)
+
+    excess = perf["做T超额收益(%)"]
+
+    # ---- 第一排：成绩单 + 核心问题答案 ----
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("策略总收益率", f"{perf['策略总收益率(%)']:.2f}%")
-    c2.metric("基准收益率",   f"{perf['基准收益率(%)']:.2f}%")
-    c3.metric("胜率",         f"{perf['胜率'] * 100:.2f}%")
-    c4.metric("最大回撤",     f"{perf['最大回撤(%)']:.2f}%")
+    c1.metric(
+        "策略总收益率",
+        _fmt(perf["策略总收益率(%)"], "{:.2f}%"),
+        delta=f"{excess:+.2f}% vs 底仓",
+        delta_color="normal",
+    )
+    c2.metric("底仓基准 (B&H)", _fmt(perf["基准收益率(%)"], "{:.2f}%"))
+    c3.metric("做 T 超额收益",  _fmt(excess,               "{:+.2f}%"))
+    c4.metric("最大回撤",       _fmt(perf["最大回撤(%)"],  "{:.2f}%"))
+
+    # ---- 第二排：时间归一化 + 行为画像 ----
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("年化收益率", _fmt(perf.get("年化收益率(%)"),    "{:.2f}%"))
+    c6.metric("平均仓位",   _fmt(perf.get("平均仓位(%)"),       "{:.1f}%"))
+    c7.metric("做 T 频率",  _fmt(perf.get("交易频率(次/年)"),  "{:.1f} 次/年"))
+    c8.metric("单笔期望值", _fmt(perf.get("期望值(%)"),         "{:+.2f}%"))
+
+    # ---- 一行说明，把容易混淆的概念统一讲清楚 ----
+    st.caption(
+        f"**分批做 T 模式**｜起始日 T+1 开盘满仓建仓，每次买/卖信号调整 1/3 仓位（档位 0–3/3），末日收盘强制清仓。  \n"
+        f"• **做 T 超额** = 策略 − 底仓，直接回答\"做这些 T 到底比躺着多赚多少\"。  \n"
+        f"• **平均仓位**：时间加权档位占比（满仓 = 100% / 空仓 = 0%），过低说明空仓太多，可能白白错过底仓涨幅。  \n"
+        f"• **单笔期望值**：每次减仓/平仓按 WAC 结算的平均 PnL%（单片视角，不等同于总收益）。  \n"
+        f"• **成本档位**（按市场自动套用）：买 {perf.get('单向成本_买(%)', 0.0):.2f}% / 卖 {perf.get('单向成本_卖(%)', 0.0):.2f}%，含佣金 + 印花税 + 滑点。"
+    )
 
     if perf.get("收益有效性检查", "通过") != "通过":
         st.warning(perf["收益有效性检查"])
@@ -446,18 +526,22 @@ def main() -> None:
     perf_fig = build_performance_figure(perf)
     st.plotly_chart(perf_fig, use_container_width=True)
 
-    with st.expander("历史交易清单（过去一年）", expanded=False):
+    with st.expander("做 T 动作流水（过去一年）", expanded=False):
         trades_year = perf["交易清单过去一年"]
         if trades_year is None or trades_year.empty:
-            st.info("过去一年无闭环交易。")
+            st.info("过去一年无交易动作。")
         else:
             st.dataframe(
                 trades_year[[
-                    "买入日期", "买入价格", "卖出日期", "卖出价格",
-                    "单笔涨跌幅(%)", "持仓天数",
+                    "日期", "动作", "价格", "份额", "金额",
+                    "持仓档位", "持仓成本", "本笔盈亏(%)",
                 ]],
                 use_container_width=True,
                 hide_index=True,
+            )
+            st.caption(
+                "本笔盈亏按卖出时点的加权平均成本（WAC）结算，已扣除买/卖双向交易成本。"
+                "买入动作的盈亏列为空（尚未兑现）。"
             )
 
 

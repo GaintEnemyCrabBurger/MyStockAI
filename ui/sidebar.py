@@ -42,6 +42,7 @@ from config import (
     load_user_settings,
     save_user_settings,
 )
+from core.search import build_catalog, lookup_label
 
 
 # ---------------------------------------------------------------------------
@@ -232,21 +233,93 @@ def render_sidebar() -> tuple[bool, str]:
     # ---- 策略与回测说明 ----
     _render_strategy_docs()
 
-    # ---- 股票代码输入表单 ----
-    default_text = st.session_state.get("input_codes_text", ",".join(DEFAULT_CODES))
+    # ---- 股票代码输入（单框：可搜索 + 可自由输入） ----
+    selected_codes = _render_code_multiselect()
+
     with st.sidebar.form("stock_control_form"):
-        input_text = st.text_input(
-            "输入股票代码（逗号分隔）",
-            value=default_text,
-            help="港股输入5位或4位代码（如 01810），A股输入6位代码（如 600519），自动识别市场",
-        )
         submitted = st.form_submit_button(
             "更新数据并计算", use_container_width=True, type="primary"
         )
 
+    input_text = ",".join(selected_codes)
     if submitted:
         st.session_state["run_analysis"] = True
         st.session_state["input_codes_text"] = input_text
         save_user_settings({"input_codes_text": input_text})
 
     return submitted, input_text
+
+
+# ---------------------------------------------------------------------------
+# 单一代码输入框（替代原"搜索框 + 输入框"双控件）
+# ---------------------------------------------------------------------------
+
+# 目录在进程生命周期内只构建一次
+_CATALOG = build_catalog()
+_CATALOG_CODES = [item["code"] for item in _CATALOG]
+
+
+def _label_of(code: str) -> str:
+    """
+    multiselect 显示用：先查精选目录拿到带名称与市场的长标签；
+    未命中的表外代码则原样显示，保证用户自定义条目也可识别。
+    """
+    hit = lookup_label(code)
+    return hit if hit else code
+
+
+def _render_code_multiselect() -> list[str]:
+    """
+    渲染单一的代码选择器。
+
+    关键特性
+    --------
+    - **一个控件完成三件事**：浏览精选池 / 中英文模糊搜索 / 手动键入新代码
+    - **中英文 + 代码全命中**：option label 同时包含四段信息
+      （code · 中文名 · 英文名 · 市场），Streamlit 原生 filter 即可做
+      子串级模糊搜索，无需自写 JS
+    - **自由输入新代码**：`accept_new_options=True` 让用户对表外 ticker
+      （如 SOFI、002747）直接按 Enter 追加为新选项
+    - **长标签在徽章内可读**：通过 format_func 把存储的 code 重新格式化
+
+    返回
+    ----
+    当前选中的 code 列表（去重，按用户选择顺序）。
+    """
+    saved = st.session_state.get("input_codes_text", ",".join(DEFAULT_CODES))
+    current = [c.strip() for c in saved.split(",") if c.strip()]
+
+    # options = 精选目录 ∪ 当前已选（保持顺序、去重）
+    options = list(_CATALOG_CODES)
+    seen = set(options)
+    for c in current:
+        if c not in seen:
+            options.append(c)
+            seen.add(c)
+
+    selected = st.sidebar.multiselect(
+        "🔍 搜索股票（中文名 / 英文名 / 代码均可）",
+        options=options,
+        default=current,
+        key="stock_code_selector",
+        format_func=_label_of,
+        accept_new_options=True,
+        placeholder="点此输入：苹果、茅台、nvidia、AAPL、600519 …",
+        help=(
+            "**一个框 · 三种用法：**\n"
+            "- 中文名：苹果 / 茅台 / 腾讯\n"
+            "- 英文名：nvidia / tencent / moutai\n"
+            "- 代码：600519 / 01810 / AAPL（前缀即可）\n\n"
+            "精选池（254 只）未收录的代码可直接键入后按 Enter 加入。"
+        ),
+    )
+    cleaned = [c.strip() for c in selected if str(c).strip()]
+    # 给出即时反馈：已选数量 + 展开"点击此处可继续搜索"的视觉提示
+    if cleaned:
+        st.sidebar.caption(
+            f"已选 **{len(cleaned)}** 只 · 点击代码旁 ✕ 可移除 · "
+            f"点击框内空白处可继续搜索"
+        )
+    else:
+        st.sidebar.caption("⬆️ 点击上方输入框开始搜索（例如输入「苹果」）")
+    return cleaned

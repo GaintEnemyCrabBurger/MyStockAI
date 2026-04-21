@@ -1,3 +1,14 @@
+# Python 字节码
 __pycache__/
 *.pyc
-.streamlit/
+
+# Streamlit Secrets（真实凭证不进 git，模板保留）
+.streamlit/secrets.toml
+
+# IDE / 环境
+.env
+.venv/
+venv/
+
+# 调试日志
+debug-*.log

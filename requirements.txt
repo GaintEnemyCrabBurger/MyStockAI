@@ -1,6 +1,22 @@
-streamlit
-akshare
-pandas
-pandas_ta
-plotly
-requests
+# ============================================================
+# MyStockAI dependencies
+# Tested on Python 3.12 (Windows)
+# Target on Streamlit Cloud: Python 3.11 or 3.12 (3.12 recommended)
+# ============================================================
+
+# ---- Web UI ----
+streamlit>=1.40
+plotly>=5.20
+
+# ---- Data processing & technical analysis ----
+pandas>=2.2,<3.1
+numpy>=1.26,<3
+pandas-ta>=0.3.14b0
+
+# ---- Market data source (A-shares / HK / US, all free public APIs) ----
+akshare>=1.15
+
+# Notes:
+# - requests / beautifulsoup4 are transitively installed by akshare.
+# - No python-dotenv: this project does not use .env files.
+# - No API keys / tokens required; akshare uses public endpoints.
