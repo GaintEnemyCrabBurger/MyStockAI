@@ -1,20 +1,22 @@
 # ============================================================
 # MyStockAI dependencies
-# Tested on Python 3.12 (Windows)
-# Target on Streamlit Cloud: Python 3.11 or 3.12 (3.12 recommended)
+# Target on Streamlit Cloud: Python 3.11 recommended
 # ============================================================
 
 # ---- Web UI ----
-streamlit>=1.40
-plotly>=5.20
+streamlit>=1.32
+plotly>=5.18
 
 # ---- Data processing & technical analysis ----
-pandas>=2.2,<3.1
-numpy>=1.26,<3
-pandas-ta>=0.3.14b0
+# IMPORTANT: pandas-ta (beta) relies on deprecated numpy APIs
+# (np.NaN, np.bool etc.) that were removed in numpy 2.x.
+# Pin numpy < 2 until pandas-ta ships a stable 0.4 release.
+numpy<2
+pandas>=1.5,<2.3
+pandas-ta==0.3.14b0
 
 # ---- Market data source (A-shares / HK / US, all free public APIs) ----
-akshare>=1.15
+akshare>=1.12
 
 # Notes:
 # - requests / beautifulsoup4 are transitively installed by akshare.
