@@ -13,7 +13,9 @@ plotly>=5.18
 # Pin numpy < 2 until pandas-ta ships a stable 0.4 release.
 numpy<2
 pandas>=1.5,<2.3
-pandas-ta==0.3.14b0
+# Use range instead of == to allow uv/pip to pick the 0.3.14b0 pre-release.
+# Upper bound <0.4 keeps the heavy numba-dependent 0.4.x line out.
+pandas-ta>=0.3.14b0,<0.4
 
 # ---- Market data source (A-shares / HK / US, all free public APIs) ----
 akshare>=1.12
