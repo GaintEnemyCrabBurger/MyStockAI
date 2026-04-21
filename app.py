@@ -479,50 +479,45 @@ def main() -> None:
         st.info("暂无可统计数据。")
         return
 
-    # ---- 第一排：核心收益与风险 ----
+    # 工具：把可能的 NaN / None 转成可读字符串
+    def _fmt(v, tpl: str = "{:.2f}") -> str:
+        if v is None:
+            return "—"
+        try:
+            if v != v:
+                return "—"
+        except TypeError:
+            return "—"
+        return tpl.format(v)
+
+    excess = perf["做T超额收益(%)"]
+
+    # ---- 第一排：成绩单 + 核心问题答案 ----
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(
         "策略总收益率",
-        f"{perf['策略总收益率(%)']:.2f}%",
-        delta=f"{perf['策略总收益率(%)'] - perf['基准收益率(%)']:+.2f}% vs 基准",
+        _fmt(perf["策略总收益率(%)"], "{:.2f}%"),
+        delta=f"{excess:+.2f}% vs 底仓",
         delta_color="normal",
     )
-    c2.metric("基准收益率 (B&H)", f"{perf['基准收益率(%)']:.2f}%")
-    ann = perf.get("年化收益率(%)", float("nan"))
-    c3.metric("年化收益率", "—" if ann != ann else f"{ann:.2f}%")
-    c4.metric("最大回撤",   f"{perf['最大回撤(%)']:.2f}%")
+    c2.metric("底仓基准 (B&H)", _fmt(perf["基准收益率(%)"], "{:.2f}%"))
+    c3.metric("做 T 超额收益",  _fmt(excess,               "{:+.2f}%"))
+    c4.metric("最大回撤",       _fmt(perf["最大回撤(%)"],  "{:.2f}%"))
 
-    # ---- 第二排：风险调整后收益与交易质量 ----
+    # ---- 第二排：时间归一化 + 行为画像 ----
     c5, c6, c7, c8 = st.columns(4)
-    sharpe = perf.get("夏普比率", float("nan"))
-    calmar = perf.get("Calmar比率", float("nan"))
-    c5.metric("夏普比率",   "—" if sharpe != sharpe else f"{sharpe:.2f}")
-    c6.metric("Calmar 比率", "—" if calmar != calmar else f"{calmar:.2f}")
-    c7.metric("胜率",       f"{perf['胜率'] * 100:.2f}%")
-    pl = perf.get("盈亏比", float("nan"))
-    if pl == float("inf"):
-        pl_display = "∞"
-    elif pl != pl:
-        pl_display = "—"
-    else:
-        pl_display = f"{pl:.2f}"
-    c8.metric("盈亏比", pl_display)
+    c5.metric("年化收益率", _fmt(perf.get("年化收益率(%)"),    "{:.2f}%"))
+    c6.metric("平均仓位",   _fmt(perf.get("平均仓位(%)"),       "{:.1f}%"))
+    c7.metric("做 T 频率",  _fmt(perf.get("交易频率(次/年)"),  "{:.1f} 次/年"))
+    c8.metric("单笔期望值", _fmt(perf.get("期望值(%)"),         "{:+.2f}%"))
 
-    # ---- 第三排：交易活跃度与成本 ----
-    c9, c10, c11, c12 = st.columns(4)
-    exp = perf.get("期望值(%)", 0.0)
-    c9.metric("单笔期望值", f"{exp:+.2f}%")
-    freq = perf.get("交易频率(次/年)", float("nan"))
-    c10.metric("交易频率",  "—" if freq != freq else f"{freq:.1f} 次/年")
-    c11.metric("在市占比",  f"{perf.get('在市占比(%)', 0.0):.1f}%")
-    c12.metric(
-        "单向成本（买/卖）",
-        f"{perf.get('单向成本_买(%)', 0.0):.2f}% / {perf.get('单向成本_卖(%)', 0.0):.2f}%",
-    )
-
+    # ---- 一行说明，把容易混淆的概念统一讲清楚 ----
     st.caption(
-        "成本按市场真实档位自动套用（A 股 0.05/0.15 %、港股 0.15/0.15 %、美股 0.05/0.05 %），"
-        "含佣金 + 印花税 + 滑点。成交价取 T+1 开盘价，避免隐性未来函数。"
+        f"**分批做 T 模式**｜起始日 T+1 开盘满仓建仓，每次买/卖信号调整 1/3 仓位（档位 0–3/3），末日收盘强制清仓。  \n"
+        f"• **做 T 超额** = 策略 − 底仓，直接回答\"做这些 T 到底比躺着多赚多少\"。  \n"
+        f"• **平均仓位**：时间加权档位占比（满仓 = 100% / 空仓 = 0%），过低说明空仓太多，可能白白错过底仓涨幅。  \n"
+        f"• **单笔期望值**：每次减仓/平仓按 WAC 结算的平均 PnL%（单片视角，不等同于总收益）。  \n"
+        f"• **成本档位**（按市场自动套用）：买 {perf.get('单向成本_买(%)', 0.0):.2f}% / 卖 {perf.get('单向成本_卖(%)', 0.0):.2f}%，含佣金 + 印花税 + 滑点。"
     )
 
     if perf.get("收益有效性检查", "通过") != "通过":
@@ -531,20 +526,23 @@ def main() -> None:
     perf_fig = build_performance_figure(perf)
     st.plotly_chart(perf_fig, use_container_width=True)
 
-    with st.expander("历史交易清单（过去一年）", expanded=False):
+    with st.expander("做 T 动作流水（过去一年）", expanded=False):
         trades_year = perf["交易清单过去一年"]
         if trades_year is None or trades_year.empty:
-            st.info("过去一年无闭环交易。")
+            st.info("过去一年无交易动作。")
         else:
             st.dataframe(
                 trades_year[[
-                    "买入日期", "买入价格", "卖出日期", "卖出价格",
-                    "单笔净收益(%)", "持仓天数",
+                    "日期", "动作", "价格", "份额", "金额",
+                    "持仓档位", "持仓成本", "本笔盈亏(%)",
                 ]],
                 use_container_width=True,
                 hide_index=True,
             )
-            st.caption("单笔净收益已扣除当前市场的买卖双向交易成本。")
+            st.caption(
+                "本笔盈亏按卖出时点的加权平均成本（WAC）结算，已扣除买/卖双向交易成本。"
+                "买入动作的盈亏列为空（尚未兑现）。"
+            )
 
 
 if __name__ == "__main__":
