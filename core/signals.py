@@ -38,7 +38,10 @@ core/signals.py — 买卖信号生成与操作建议（加权投票制）
 
 强信号
 ------
-总分 ≥ vote_threshold + 0.8 时升级为 strong_buy/sell。
+阈值与满分（3.0）之间插 40% 作为强信号门槛：
+    strong_threshold = vote_threshold + (3.0 - vote_threshold) * 0.4
+
+保证 1-10 档全部可达且幅度有区分（旧版固定 +0.8 在保守档位永远达不到）。
 
 边沿检测
 --------
@@ -180,10 +183,12 @@ def calculate_signals(
     out["buy_signal"]  = raw_buy  & (~raw_buy.shift(1).fillna(False))
     out["sell_signal"] = raw_sell & (~raw_sell.shift(1).fillna(False))
 
-    # ==== 强信号：分数显著超过阈值 ====
-    strong_gap = 0.8
-    out["strong_buy_signal"]  = out["buy_signal"]  & (out["buy_score"]  >= threshold + strong_gap)
-    out["strong_sell_signal"] = out["sell_signal"] & (out["sell_score"] >= threshold + strong_gap)
+    # ==== 强信号：分数明显高于阈值 ====
+    # 强档 = 阈值 → 满分（3.0）之间的 40% 位置
+    # 保证任何灵敏度档位下都可达，且幅度随档位自然缩放
+    strong_threshold = threshold + (3.0 - threshold) * 0.4
+    out["strong_buy_signal"]  = out["buy_signal"]  & (out["buy_score"]  >= strong_threshold)
+    out["strong_sell_signal"] = out["sell_signal"] & (out["sell_score"] >= strong_threshold)
 
     out["overbought"] = out["RSI6"] > 80
 

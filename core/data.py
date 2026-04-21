@@ -3,7 +3,7 @@ core/data.py — 行情数据拉取层
 
 职责
 ----
-1. 封装 akshare 的 A 股与港股历史行情接口。
+1. 封装 akshare 的 A 股 / 港股 / 美股历史行情接口。
 2. 统一列名映射（中文 → 英文）、数据类型转换、日期过滤与排序。
 3. 处理网络代理冲突：在调用 akshare 前临时清除代理环境变量，结束后恢复。
 4. 提供 A 股降级回退：东方财富源不稳定时自动切换新浪财经源。
@@ -13,7 +13,7 @@ core/data.py — 行情数据拉取层
 ------
 用户输入代码 + 市场类型
   → fetch_stock_data()
-  → fetch_a_data() 或 fetch_hk_data()
+  → fetch_a_data() / fetch_hk_data() / fetch_us_data()
   → akshare API（带代理保护上下文）
   → 列重命名 + 类型转换 + 排序
   → 标准 DataFrame（列：date / open / high / low / close / volume）
@@ -22,6 +22,7 @@ core/data.py — 行情数据拉取层
 --------
 使用 @st.cache_data(ttl=300) 对相同参数的请求缓存 5 分钟，
 避免用户在调整指标参数时重复发起网络请求。
+美股股票列表使用 ttl=86400（1 天）长缓存，避免每次搜索都重新拉全市场列表。
 """
 
 from __future__ import annotations
@@ -236,6 +237,60 @@ def fetch_a_data(
 
 
 # ---------------------------------------------------------------------------
+# 美股数据拉取
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=300)
+def fetch_us_data(
+    symbol: str,
+    adjust: str = "qfq",
+    backtest_start_date: date | None = None,
+    backtest_end_date: date | None = None,
+) -> pd.DataFrame:
+    """
+    拉取美股历史行情（akshare stock_us_daily，数据源来自新浪财经）。
+
+    实现说明
+    --------
+    - 主源 `stock_us_daily(symbol, adjust)`：直接接受 ticker（AAPL / TSLA / TSM 等），
+      返回全历史日线（含 date / open / high / low / close / volume 英文列），
+      本地再按 `_clean_df` 裁剪到回测区间。响应通常 1-2 秒，适合直连。
+    - 不使用 `stock_us_hist`（东方财富源）作为兜底：该接口需要带 "106.AAPL" 前缀，
+      而获取前缀的 `get_us_stock_name` / `stock_us_spot_em` 需遍历 8K+ 标的，非常慢。
+
+    输入容错
+    --------
+    akshare 的新浪 ticker 规范允许大写字母和点（BRK.B、BF-B 等）。
+    本函数不做进一步清洗，由调用方（config.detect_and_normalize）保证格式。
+
+    参数
+    ----
+    symbol              : 美股 ticker（大写，如 "AAPL"、"BRK.B"）
+    adjust              : 复权方式，默认前复权 "qfq"；不复权传 ""
+    backtest_start_date : 回测起始日期
+    backtest_end_date   : 回测结束日期
+
+    返回
+    ----
+    标准化 DataFrame，列：date / open / high / low / close / volume；
+    拉取失败或代码不存在时返回空 DataFrame。
+    """
+    start_date, end_date = _resolve_dates(backtest_start_date, backtest_end_date)
+
+    df = pd.DataFrame()
+    with _no_proxy():
+        try:
+            df = ak.stock_us_daily(symbol=symbol, adjust=adjust)
+        except Exception:
+            return pd.DataFrame()
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    return _clean_df(df, start_date, end_date)
+
+
+# ---------------------------------------------------------------------------
 # 统一入口
 # ---------------------------------------------------------------------------
 
@@ -251,10 +306,16 @@ def fetch_stock_data(
     参数
     ----
     code   : 规范化后的股票代码
-    market : "A" 表示 A 股，"HK" 表示港股
+    market : "A" = A 股，"HK" = 港股，"US" = 美股
     """
     if market == "A":
         return fetch_a_data(
+            code,
+            backtest_start_date=backtest_start_date,
+            backtest_end_date=backtest_end_date,
+        )
+    if market == "US":
+        return fetch_us_data(
             code,
             backtest_start_date=backtest_start_date,
             backtest_end_date=backtest_end_date,

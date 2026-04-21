@@ -5,7 +5,7 @@ config.py — 全局配置、持久化设置、市场识别、灵敏度参数映
 ----
 1. 常量定义：默认代码、版本号、设置文件路径等。
 2. 用户设置读写：基于本地 JSON 文件持久化侧边栏状态。
-3. 市场与代码规范化：根据位数自动判断 A 股 / 港股，并统一代码格式。
+3. 市场与代码规范化：根据位数/字母自动判断 A 股 / 港股 / 美股，并统一代码格式。
 4. 灵敏度参数映射：将 1-10 档灵敏度线性插值为具体指标参数。
 """
 
@@ -13,13 +13,22 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "v4.0-modular"
-DEFAULT_CODES = ["09992", "01810"]
+APP_VERSION = "v4.1-us-support"
+# 默认预置：覆盖三大市场热门标的
+DEFAULT_CODES = ["09992", "01810", "AAPL", "NVDA"]
+
+# 市场代号 → 人类可读标签
+MARKET_LABELS = {
+    "A":  "A股",
+    "HK": "港股",
+    "US": "美股",
+}
 
 # 灵敏度选项：1-10 整数档 + 手动微调
 SENSITIVITY_OPTIONS: list[str] = [str(i) for i in range(1, 11)] + ["自定义"]
@@ -56,31 +65,69 @@ def save_user_settings(data: dict) -> None:
 # 市场识别与代码规范化
 # ---------------------------------------------------------------------------
 
+# 美股代码匹配：1-6 位字母起头，可含数字/点/短横（覆盖 BRK.B、BF-B、PBR.A 等）
+_US_TICKER_RE = re.compile(r"^[A-Z][A-Z0-9]{0,5}([.\-][A-Z0-9]{1,3})?$")
+
+
 def detect_and_normalize(raw: str) -> tuple[str, str]:
     """
     根据输入自动识别市场并规范化股票代码。
 
     规则
     ----
-    - 6 位纯数字 → A 股，原样返回
-    - 其余 → 港股，不足 5 位时左补零
+    - 6 位纯数字                → A 股（原样）
+    - 4-5 位纯数字 / 含 .HK     → 港股（补零至 5 位）
+    - 字母为主 / 含 .US         → 美股（统一大写，保留点与短横）
+
+    示例
+    ----
+    "600519"       → ("A",  "600519")
+    "1810"         → ("HK", "01810")
+    "01810.HK"     → ("HK", "01810")
+    "AAPL"         → ("US", "AAPL")
+    "brk.b"        → ("US", "BRK.B")
+    "TSLA.US"      → ("US", "TSLA")
 
     参数
     ----
-    raw : 用户输入的原始字符串（如 "1810"、"01810.HK"、"600519"）
+    raw : 用户输入的原始字符串
 
     返回
     ----
-    (market, code)：market 为 "A" 或 "HK"，code 为规范化后的纯数字字符串。
+    (market, code)：market 为 "A" / "HK" / "US"；code 为规范化后的代码字符串。
+    无法识别时返回 ("", "")。
     """
-    raw = str(raw).strip().upper()
+    if raw is None:
+        return "", ""
+    s = str(raw).strip().upper()
+    if not s:
+        return "", ""
+
+    # 剥离市场后缀
     for suffix in (".HK", ".SH", ".SZ"):
-        raw = raw.replace(suffix, "")
-    digits = "".join(c for c in raw if c.isdigit())
-    if len(digits) == 6:
-        return "A", digits
-    hk_code = digits.zfill(5) if digits else ""
-    return "HK", hk_code
+        if s.endswith(suffix):
+            s = s[: -len(suffix)]
+            break
+    if s.endswith(".US"):
+        s = s[: -3]
+
+    # 纯数字 → A 股 or 港股
+    if s.isdigit():
+        if len(s) == 6:
+            return "A", s
+        if 1 <= len(s) <= 5:
+            return "HK", s.zfill(5)
+        return "", ""
+
+    # 含字母 → 视作美股
+    if _US_TICKER_RE.match(s):
+        return "US", s
+
+    # 兼容旧调用方式：无法识别时返回港股降级（保持向后兼容）
+    digits = "".join(c for c in s if c.isdigit())
+    if digits:
+        return "HK", digits.zfill(5)
+    return "", ""
 
 
 # ---------------------------------------------------------------------------
