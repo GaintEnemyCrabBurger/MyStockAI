@@ -174,11 +174,21 @@ def render_sidebar() -> tuple[bool, str]:
         [data-testid="stSidebar"] .stSlider label p,
         [data-testid="stSidebar"] .stTextInput label p,
         [data-testid="stSidebar"] .stDateInput label p,
+        [data-testid="stSidebar"] .stDateInput [data-testid="stWidgetLabel"] p,
+        [data-testid="stSidebar"] .stDateInput [data-testid="stWidgetLabel"] span,
         [data-testid="stSidebar"] .stMultiSelect label p,
         [data-testid="stSidebar"] [data-baseweb="select"] input,
         [data-testid="stSidebar"] [data-baseweb="tag"] span,
         [data-testid="stSidebar"] .stButton button{
             font-size: var(--sb-font) !important;
+        }
+        /* 回测日期：框内数字与标签统一（多版本 Streamlit / Base Web 结构） */
+        [data-testid="stSidebar"] .stDateInput input,
+        [data-testid="stSidebar"] [data-testid="stDateInput"] input,
+        [data-testid="stSidebar"] .stDateInput [data-baseweb="input"] input,
+        [data-testid="stSidebar"] .stDateInput [data-baseweb="input"] {
+            font-size: var(--sb-font) !important;
+            line-height: 1.45 !important;
         }
         [data-testid="stSidebar"] h2{font-size:0.90rem !important;}
         [data-testid="stSidebar"] h3,[data-testid="stSidebar"] h4{font-size:0.86rem !important;}
