@@ -164,8 +164,19 @@ def render_sidebar() -> tuple[bool, str]:
     st.markdown(
         """
         <style>
-        [data-testid="stSidebar"]{
-            --sb-font: 0.82rem;
+        /* 与侧栏控件一致；下拉 Portal 挂在 body，需定义在 :root */
+        :root { --sb-font: 0.82rem; }
+        /* Multiselect / Select 下拉备选列表（Base Web Popover，不在 stSidebar 子树内） */
+        [data-baseweb="popover"] [role="option"],
+        [data-baseweb="popover"] [data-baseweb="menu"] li,
+        [data-baseweb="popover"] li,
+        div[data-baseweb="menu"] [role="option"],
+        div[data-baseweb="menu"] li {
+            font-size: var(--sb-font) !important;
+        }
+        [data-baseweb="popover"] [role="option"] span,
+        div[data-baseweb="menu"] li span {
+            font-size: inherit !important;
         }
         [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
         [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] li,
