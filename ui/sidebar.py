@@ -160,6 +160,33 @@ def render_sidebar() -> tuple[bool, str]:
     """
     _init_state()
 
+    # 侧边栏字体统一缩小（在侧边栏渲染入口再注入一次，确保覆盖组件默认样式）
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"]{
+            --sb-font: 0.82rem;
+        }
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] li,
+        [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
+        [data-testid="stSidebar"] .stCaptionContainer p,
+        [data-testid="stSidebar"] .stSlider label p,
+        [data-testid="stSidebar"] .stTextInput label p,
+        [data-testid="stSidebar"] .stDateInput label p,
+        [data-testid="stSidebar"] .stMultiSelect label p,
+        [data-testid="stSidebar"] [data-baseweb="select"] input,
+        [data-testid="stSidebar"] [data-baseweb="tag"] span,
+        [data-testid="stSidebar"] .stButton button{
+            font-size: var(--sb-font) !important;
+        }
+        [data-testid="stSidebar"] h2{font-size:0.90rem !important;}
+        [data-testid="stSidebar"] h3,[data-testid="stSidebar"] h4{font-size:0.86rem !important;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     # ---- 策略灵敏度 ----
     st.sidebar.markdown("## 策略预设")
     st.sidebar.select_slider(

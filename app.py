@@ -122,10 +122,6 @@ def _setup_page() -> None:
             background-color: #FBFBFD;
             border-right: 1px solid var(--divider);
         }
-        [data-testid="stSidebar"] .stMarkdown h2 {
-            font-size: 1.05rem;
-            font-weight: 600;
-        }
 
         /* 按钮：Apple 胶囊 */
         .stButton > button,
@@ -269,7 +265,7 @@ def _setup_page() -> None:
         /* 输入光标区域：保证可见高度 */
         [data-testid="stSidebar"] [data-baseweb="select"] input {
             min-height: 28px !important;
-            font-size: 0.95rem !important;
+            font-size: var(--sidebar-font-size) !important;
         }
         </style>
         """,
