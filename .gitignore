@@ -12,3 +12,4 @@ venv/
 
 # 调试日志
 debug-*.log
+streamlit_launch_error.txt
